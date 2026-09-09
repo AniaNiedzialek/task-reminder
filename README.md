@@ -15,9 +15,17 @@ python3 -m venv .venv
 ```
 
 The first run asks for Calendar access. macOS grants it to the *app running the
-script* (Terminal, iTerm, VS Code), not to the script itself — so if you later
-switch terminals, approve it again under
-**System Settings → Privacy & Security → Calendars**.
+script*, never to the script itself — so switching terminals means approving
+again under **System Settings → Privacy & Security → Calendars**.
+
+**Run it from Terminal.app or iTerm, not VS Code's integrated terminal.** macOS
+only shows the Calendar prompt for an app whose `Info.plist` declares
+`NSCalendarsUsageDescription`; VS Code ships no calendar key, so the request is
+refused with no dialog and the status stays `not determined` forever. Nothing
+about the script can work around that.
+
+`--diagnose` reports which app is being held responsible and what it is allowed
+to do.
 
 ## Usage
 

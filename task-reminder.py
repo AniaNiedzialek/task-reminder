@@ -94,7 +94,7 @@ def request_access(store: EKEventStore, timeout: float = 120.0):
     return result["granted"], result["error"], not done.is_set()
 
 
-def access_help(timed_out: bool = False, error=None) -> str:
+def access_help(timed_out: bool = False, error=None, requested: bool = False) -> str:
     status, app = auth_status(), host_app()
     lines = [
         "No Calendar access.",
@@ -104,13 +104,8 @@ def access_help(timed_out: bool = False, error=None) -> str:
     ]
     if timed_out:
         lines += [
-            "The permission dialog never appeared. That is usually because this",
-            "app cannot present one -- most often an app running from ~/Downloads",
-            "with a quarantine flag, which macOS relocates to a random read-only",
-            "path so permissions can never stick to it.",
-            "",
-            "Fix: move the app into /Applications, then run this again.",
-            "Or just run it once from Terminal.app, which can show the prompt.",
+            "The permission dialog never appeared and the request never came back.",
+            "Try running this from Terminal.app instead.",
         ]
     elif status in (1, 2):
         lines += [
@@ -125,6 +120,27 @@ def access_help(timed_out: bool = False, error=None) -> str:
         lines += [
             "This app can only add events, not read them. Grant full access under:",
             "    System Settings > Privacy & Security > Calendars",
+        ]
+    elif requested:
+        # Asked, refused instantly, status never moved off notDetermined. macOS
+        # only presents the prompt for an app whose Info.plist declares a
+        # calendar usage string; without one the request dies silently.
+        lines += [
+            f"{app} requested access and macOS refused without showing a prompt.",
+            "",
+            "An app can only trigger the Calendar prompt if its Info.plist declares",
+            "NSCalendarsUsageDescription (NSCalendarsFullAccessUsageDescription on",
+            "macOS 14+). VS Code ships neither, so its built-in terminal can never",
+            "read your calendar. Moving or re-signing the app does not change that.",
+            "",
+            "Run it from Terminal.app or iTerm instead:",
+            f"    cd {os.getcwd()}",
+            "    ./.venv/bin/python task-reminder.py",
+        ]
+    else:
+        lines += [
+            "Access has not been requested yet in this app.",
+            "Run without --diagnose to trigger the permission prompt.",
         ]
     if error:
         lines += ["", f"  error: {error}"]
@@ -141,7 +157,7 @@ def open_store() -> EKEventStore:
     if granted and auth_status() == AUTHORIZED:
         return store
 
-    sys.exit(access_help(timed_out, error))
+    sys.exit(access_help(timed_out, error, requested=True))
 
 
 def diagnose() -> None:
