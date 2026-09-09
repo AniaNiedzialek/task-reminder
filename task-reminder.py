@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -24,7 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from EventKit import EKEventStore, EKEntityTypeEvent
-from Foundation import NSDate
+from Foundation import NSDate, NSDefaultRunLoopMode, NSRunLoop
 
 # How many minutes before an event to ping. One notification per lead time.
 DEFAULT_LEADS = [10, 1]
@@ -41,13 +42,35 @@ AUTHORIZED = 3  # EKAuthorizationStatusFullAccess (also .authorized pre-Sonoma)
 # Calendar access
 # --------------------------------------------------------------------------
 
-def open_store() -> EKEventStore:
-    """Return an EventKit store, prompting for Calendar access if needed."""
-    store = EKEventStore.alloc().init()
+STATUS_NAMES = {
+    0: "not determined (never asked)",
+    1: "restricted (blocked by policy or MDM)",
+    2: "denied",
+    3: "full access",
+    4: "write only (can add events, cannot read them)",
+}
 
-    if EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent) == AUTHORIZED:
-        return store
 
+def auth_status() -> int:
+    return EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent)
+
+
+def host_app() -> str:
+    """Bundle id of the app macOS holds responsible for our permissions.
+
+    TCC grants attach to the enclosing app -- Terminal, iTerm, VS Code -- never
+    to the Python binary, so this is what actually needs approving.
+    """
+    return os.environ.get("__CFBundleIdentifier") or "unknown"
+
+
+def request_access(store: EKEventStore, timeout: float = 120.0):
+    """Ask for Calendar access. Returns (granted, error, timed_out).
+
+    The run loop is the whole trick here: a CLI has no event loop, and without
+    one macOS never presents the permission dialog and the completion handler
+    never fires -- the request just hangs until it times out.
+    """
     done = threading.Event()
     result = {"granted": False, "error": None}
 
@@ -56,20 +79,84 @@ def open_store() -> EKEventStore:
         result["error"] = error
         done.set()
 
-    # macOS 14+ split read access out into its own request.
     if hasattr(store, "requestFullAccessToEventsWithCompletion_"):
-        store.requestFullAccessToEventsWithCompletion_(handler)
+        store.requestFullAccessToEventsWithCompletion_(handler)  # macOS 14+
     else:
         store.requestAccessToEntityType_completion_(EKEntityTypeEvent, handler)
 
-    if not done.wait(timeout=60) or not result["granted"]:
-        sys.exit(
-            "No Calendar access.\n"
-            "Grant it in System Settings > Privacy & Security > Calendars,\n"
-            "ticking the app you run this from (Terminal, iTerm, VS Code...).\n"
-            f"{result['error'] or ''}".rstrip()
+    loop = NSRunLoop.currentRunLoop()
+    deadline = time.monotonic() + timeout
+    while not done.is_set() and time.monotonic() < deadline:
+        loop.runMode_beforeDate_(
+            NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(0.1)
         )
-    return store
+
+    return result["granted"], result["error"], not done.is_set()
+
+
+def access_help(timed_out: bool = False, error=None) -> str:
+    status, app = auth_status(), host_app()
+    lines = [
+        "No Calendar access.",
+        f"  status:     {status} - {STATUS_NAMES.get(status, 'unknown')}",
+        f"  asking as:  {app}",
+        "",
+    ]
+    if timed_out:
+        lines += [
+            "The permission dialog never appeared. That is usually because this",
+            "app cannot present one -- most often an app running from ~/Downloads",
+            "with a quarantine flag, which macOS relocates to a random read-only",
+            "path so permissions can never stick to it.",
+            "",
+            "Fix: move the app into /Applications, then run this again.",
+            "Or just run it once from Terminal.app, which can show the prompt.",
+        ]
+    elif status in (1, 2):
+        lines += [
+            "macOS is holding a stored refusal for this app. Clear it, then rerun:",
+            f"    tccutil reset Calendar {app}" if app != "unknown"
+            else "    tccutil reset Calendar",
+            "",
+            "Or tick the app under:",
+            "    System Settings > Privacy & Security > Calendars",
+        ]
+    elif status == 4:
+        lines += [
+            "This app can only add events, not read them. Grant full access under:",
+            "    System Settings > Privacy & Security > Calendars",
+        ]
+    if error:
+        lines += ["", f"  error: {error}"]
+    return "\n".join(lines)
+
+
+def open_store() -> EKEventStore:
+    """Return an EventKit store, prompting for Calendar access if needed."""
+    store = EKEventStore.alloc().init()
+    if auth_status() == AUTHORIZED:
+        return store
+
+    granted, error, timed_out = request_access(store)
+    if granted and auth_status() == AUTHORIZED:
+        return store
+
+    sys.exit(access_help(timed_out, error))
+
+
+def diagnose() -> None:
+    status = auth_status()
+    print(f"responsible app : {host_app()}")
+    print(f"calendar access : {status} - {STATUS_NAMES.get(status, 'unknown')}")
+    if status != AUTHORIZED:
+        print()
+        print(access_help())
+        return
+    store = EKEventStore.alloc().init()
+    cals = store.calendarsForEntityType_(EKEntityTypeEvent) or []
+    print(f"calendars       : {len(cals)}")
+    for c in cals:
+        print(f"                  - {c.title()}")
 
 
 def upcoming_events(store: EKEventStore, hours: int = LOOKAHEAD_HOURS) -> list[dict]:
@@ -194,10 +281,16 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list upcoming events and exit")
     parser.add_argument("--test-notify", action="store_true",
                         help="send a sample notification and exit")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="report permission state and visible calendars")
     args = parser.parse_args()
 
     if args.test_notify:
         notify("task-reminder", "Notifications are working", "You'll get pings like this.")
+        return
+
+    if args.diagnose:
+        diagnose()
         return
 
     store = open_store()
