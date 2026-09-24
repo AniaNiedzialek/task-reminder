@@ -24,10 +24,18 @@ python3 -m venv .venv
 - the Calendar permission is granted to the app that runs the script, not to the script itself. Is the permissions misbehave run --diagnose.
 
 ## Architecture: 
-parts that are pure logic:
-- _applescript_str,"--lead parsing in main()", open_store, notify
-parts that touch macOS:
-- open_store(), notify, load_state, save_state, check() is pure with side effects; upcoming_events, notify_event
+Pure logic (no side effects, easy to test):
+- `_applescript_str`, `--lead` parsing in `main()`
+
+Side effects (touch the calendar, notifications or disk):
+- Calendar: `open_store`, `upcoming_events`
+- Notifications: `notify`, `notify_event`
+- Disk: `load_state`, `save_state`
+
+Mixed:
+- `check()` mixes both: it decides which reminders are due (pure logic) AND
+  fetches events, sends notifications and saves state (side effects).
+  Planned refactor: extract the decision into a pure `due_pings()`.
 
 ## Convention:
 - Keep it a single file. No new dependencies without asking. No classes where a function works.
