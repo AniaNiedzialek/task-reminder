@@ -259,7 +259,10 @@ def save_state(state: dict) -> None:
 
 def check(store: EKEventStore, leads: list[int], state: dict, verbose: bool = False) -> None:
     now = datetime.now()
-    for event in upcoming_events(store):
+    events = upcoming_events(store)
+    pinged = 0
+
+    for event in events:
         if event["all_day"]:
             continue  # all-day events have no meaningful "10 minutes before"
         minutes_out = (event["start"] - now).total_seconds() / 60
@@ -268,8 +271,18 @@ def check(store: EKEventStore, leads: list[int], state: dict, verbose: bool = Fa
             if minutes_out <= lead and key not in state:
                 notify_event(event, round(minutes_out))
                 state[key] = time.time()
+                pinged += 1
                 if verbose:
-                    print(f"[{now:%H:%M:%S}] pinged: {event['title']} (T-{lead}m)")
+                    print(f"[{now:%Y-%m-%d %H:%M:%S}] PING {event['title']} (T-{lead}m)")
+
+    if verbose:
+        # A heartbeat every run: a log that only speaks up when it pings gives
+        # no way to tell "working, nothing due" from "silently broken".
+        nxt = next((e for e in events if not e["all_day"]), None)
+        upcoming = f"next: {nxt['title']} at {nxt['start']:%H:%M}" if nxt else "next: none"
+        print(f"[{now:%Y-%m-%d %H:%M:%S}] ok - {len(events)} event(s), "
+              f"{pinged} pinged, {upcoming}")
+
     save_state(state)
 
 
